@@ -1,12 +1,10 @@
-import { AbortController } from 'node:events';
-import type { AbortSignal } from 'node:events';
 import type {
   JitterStrategy,
   RetryConfig,
   RetryContext,
   RetryResult,
 } from './types.js';
-import { RetryError } from './types.js';
+import { RetryError, matchesErrorFilter } from './types.js';
 
 /**
  * Executes an async operation with retry capabilities based on exponential backoff and jitter.
@@ -16,12 +14,19 @@ import { RetryError } from './types.js';
  * @throws {RetryError} When all attempts fail or operation is aborted/timed out
  * @example
  * const data = await retry(fetchData, { maxAttempts: 3, baseDelayMs: 100 });
+ * @example
+ * // Only retry on network errors, fail immediately on validation errors
+ * const data = await retry(fetchData, {
+ *   maxAttempts: 5,
+ *   retryOn: [TypeError, (e) => e instanceof Error && e.message.includes('ETIMEDOUT')],
+ *   abortOn: [ValidationError],
+ * });
  */
 export async function retry<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   config?: RetryConfig
 ): Promise<RetryResult<T>> {
-  const resolvedConfig: Required<RetryConfig> = {
+  const resolvedConfig: Required<Omit<RetryConfig, 'retryOn' | 'abortOn'>> & Pick<RetryConfig, 'retryOn' | 'abortOn'> = {
     maxAttempts: config?.maxAttempts ?? 3,
     baseDelayMs: config?.baseDelayMs ?? 1000,
     maxDelayMs: config?.maxDelayMs ?? 30000,
@@ -29,6 +34,8 @@ export async function retry<T>(
     jitterStrategy: config?.jitterStrategy ?? 'none',
     abortSignal: config?.abortSignal,
     shouldRetry: config?.shouldRetry ?? (() => true),
+    retryOn: config?.retryOn,
+    abortOn: config?.abortOn,
   };
 
   validateConfig(resolvedConfig);
@@ -53,7 +60,7 @@ export async function retry<T>(
       }
 
       const elapsedMs = Date.now() - startTime;
-      if (elapsedMs >= resolvedConfig.timeoutMs) {
+      if (elapsedMs >= resolvedConfig.timeoutMs!) {
         throw new RetryError(`Timeout after ${resolvedConfig.timeoutMs}ms`, {
           cause: lastError ?? new Error('Timeout'),
           attempts: attempt - 1,
@@ -67,6 +74,24 @@ export async function retry<T>(
       } catch (error) {
         lastError = error;
 
+        // abortOn takes highest precedence — immediately fail
+        if (resolvedConfig.abortOn && matchesErrorFilter(error, resolvedConfig.abortOn)) {
+          throw new RetryError(`Aborted due to non-retryable error on attempt ${attempt}`, {
+            cause: error,
+            attempts: attempt,
+            elapsedTimeMs: Date.now() - startTime,
+          });
+        }
+
+        // retryOn — if set, error must match to be retried
+        if (resolvedConfig.retryOn && !matchesErrorFilter(error, resolvedConfig.retryOn)) {
+          throw new RetryError(`Error not retryable on attempt ${attempt}`, {
+            cause: error,
+            attempts: attempt,
+            elapsedTimeMs: Date.now() - startTime,
+          });
+        }
+
         if (attempt >= resolvedConfig.maxAttempts) break;
 
         const retryContext: RetryContext = {
@@ -75,15 +100,15 @@ export async function retry<T>(
           elapsedTimeMs: Date.now() - startTime,
           previousDelayMs,
         };
-        const shouldRetry = await resolvedConfig.shouldRetry(retryContext);
+        const shouldRetry = await resolvedConfig.shouldRetry!(retryContext);
         if (!shouldRetry) break;
 
         const baseDelay = Math.min(
-          resolvedConfig.baseDelayMs * 2 ** (attempt - 1),
-          resolvedConfig.maxDelayMs
+          resolvedConfig.baseDelayMs! * 2 ** (attempt - 1),
+          resolvedConfig.maxDelayMs!
         );
-        const jittered = applyJitter(baseDelay, resolvedConfig.jitterStrategy);
-        const remainingTime = resolvedConfig.timeoutMs - (Date.now() - startTime);
+        const jittered = applyJitter(baseDelay, resolvedConfig.jitterStrategy!);
+        const remainingTime = resolvedConfig.timeoutMs! - (Date.now() - startTime);
         const actualDelay = Math.max(0, Math.min(jittered, remainingTime));
 
         if (actualDelay > 0) {
@@ -119,7 +144,7 @@ function applyJitter(delay: number, strategy: JitterStrategy): number {
   }
 }
 
-function validateConfig(config: Required<RetryConfig>): void {
+function validateConfig(config: { maxAttempts: number; baseDelayMs: number; maxDelayMs: number; timeoutMs: number }): void {
   if (config.maxAttempts < 1) throw new RangeError('maxAttempts must be ≥1');
   if (config.baseDelayMs < 0) throw new RangeError('baseDelayMs must be ≥0');
   if (config.maxDelayMs < 0) throw new RangeError('maxDelayMs must be ≥0');
