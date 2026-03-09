@@ -4,6 +4,15 @@ export type JitterStrategy =
   | 'full'   // Random value between 0 and base delay
   | 'equal'; // Random value between baseDelay/2 and baseDelay
 
+/** Built-in backoff strategy names */
+export type BackoffStrategyName = 'exponential' | 'linear' | 'fixed';
+
+/** Custom backoff function: receives attempt number (1-based) and baseDelayMs, returns delay in ms */
+export type BackoffFunction = (attempt: number, baseDelayMs: number) => number;
+
+/** Backoff strategy — built-in name or custom function */
+export type BackoffStrategy = BackoffStrategyName | BackoffFunction;
+
 /** Error class constructor type for matching */
 export type ErrorConstructor = new (...args: any[]) => Error;
 
@@ -20,6 +29,15 @@ export interface RetryConfig {
   readonly maxDelayMs?: number;
   readonly timeoutMs?: number;
   readonly jitterStrategy?: JitterStrategy;
+  /**
+   * Backoff strategy for computing delay between retries.
+   * - `'exponential'` (default): delay = baseDelayMs * 2^(attempt-1)
+   * - `'linear'`: delay = baseDelayMs * attempt
+   * - `'fixed'`: delay = baseDelayMs (constant)
+   * - `(attempt, baseDelayMs) => number`: custom function returning delay in ms
+   * @default 'exponential'
+   */
+  readonly backoffStrategy?: BackoffStrategy;
   readonly abortSignal?: AbortSignal;
   readonly shouldRetry?: (context: RetryContext) => boolean | Promise<boolean>;
   /**
@@ -90,4 +108,32 @@ export function matchesErrorFilter(error: unknown, filter: ErrorFilter): boolean
     }
     return (f as ErrorPredicate)(error);
   });
+}
+
+/**
+ * Computes the raw backoff delay (before jitter and maxDelayMs capping) for a given attempt.
+ * @param strategy - The backoff strategy to use
+ * @param attempt - The current attempt number (1-based)
+ * @param baseDelayMs - The base delay in milliseconds
+ * @returns The computed delay in milliseconds
+ */
+export function computeBackoffDelay(
+  strategy: BackoffStrategy,
+  attempt: number,
+  baseDelayMs: number
+): number {
+  if (typeof strategy === 'function') {
+    return strategy(attempt, baseDelayMs);
+  }
+  switch (strategy) {
+    case 'exponential':
+      return baseDelayMs * 2 ** (attempt - 1);
+    case 'linear':
+      return baseDelayMs * attempt;
+    case 'fixed':
+      return baseDelayMs;
+    default:
+      const _exhaustive: never = strategy;
+      throw new Error(`Invalid backoff strategy: ${_exhaustive}`);
+  }
 }

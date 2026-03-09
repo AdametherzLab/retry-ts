@@ -3,11 +3,12 @@ import type {
   RetryConfig,
   RetryContext,
   RetryResult,
+  BackoffStrategy,
 } from './types.js';
-import { RetryError, matchesErrorFilter } from './types.js';
+import { RetryError, matchesErrorFilter, computeBackoffDelay } from './types.js';
 
 /**
- * Executes an async operation with retry capabilities based on exponential backoff and jitter.
+ * Executes an async operation with retry capabilities based on configurable backoff and jitter.
  * @param operation - Async function to execute. Receives AbortSignal for cancellation
  * @param config - Configuration for retry behavior
  * @returns Promise resolving to operation result with retry metadata
@@ -15,11 +16,13 @@ import { RetryError, matchesErrorFilter } from './types.js';
  * @example
  * const data = await retry(fetchData, { maxAttempts: 3, baseDelayMs: 100 });
  * @example
- * // Only retry on network errors, fail immediately on validation errors
+ * // Use linear backoff
+ * const data = await retry(fetchData, { maxAttempts: 5, backoffStrategy: 'linear' });
+ * @example
+ * // Use a custom backoff function
  * const data = await retry(fetchData, {
  *   maxAttempts: 5,
- *   retryOn: [TypeError, (e) => e instanceof Error && e.message.includes('ETIMEDOUT')],
- *   abortOn: [ValidationError],
+ *   backoffStrategy: (attempt, base) => base * attempt * attempt, // quadratic
  * });
  */
 export async function retry<T>(
@@ -32,6 +35,7 @@ export async function retry<T>(
     maxDelayMs: config?.maxDelayMs ?? 30000,
     timeoutMs: config?.timeoutMs ?? Infinity,
     jitterStrategy: config?.jitterStrategy ?? 'none',
+    backoffStrategy: config?.backoffStrategy ?? 'exponential',
     abortSignal: config?.abortSignal,
     shouldRetry: config?.shouldRetry ?? (() => true),
     retryOn: config?.retryOn,
@@ -104,7 +108,7 @@ export async function retry<T>(
         if (!shouldRetry) break;
 
         const baseDelay = Math.min(
-          resolvedConfig.baseDelayMs! * 2 ** (attempt - 1),
+          computeBackoffDelay(resolvedConfig.backoffStrategy!, attempt, resolvedConfig.baseDelayMs!),
           resolvedConfig.maxDelayMs!
         );
         const jittered = applyJitter(baseDelay, resolvedConfig.jitterStrategy!);
