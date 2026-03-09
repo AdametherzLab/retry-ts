@@ -16,13 +16,11 @@ import { RetryError, matchesErrorFilter, computeBackoffDelay } from './types.js'
  * @example
  * const data = await retry(fetchData, { maxAttempts: 3, baseDelayMs: 100 });
  * @example
- * // Use linear backoff
- * const data = await retry(fetchData, { maxAttempts: 5, backoffStrategy: 'linear' });
- * @example
- * // Use a custom backoff function
- * const data = await retry(fetchData, {
+ * // Use linear backoff with decorrelated jitter
+ * const data = await retry(fetchData, { 
  *   maxAttempts: 5,
- *   backoffStrategy: (attempt, base) => base * attempt * attempt, // quadratic
+ *   backoffStrategy: 'linear',
+ *   jitterStrategy: 'decorrelated'
  * });
  */
 export async function retry<T>(
@@ -107,11 +105,14 @@ export async function retry<T>(
         const shouldRetry = await resolvedConfig.shouldRetry!(retryContext);
         if (!shouldRetry) break;
 
-        const baseDelay = Math.min(
-          computeBackoffDelay(resolvedConfig.backoffStrategy!, attempt, resolvedConfig.baseDelayMs!),
-          resolvedConfig.maxDelayMs!
+        const baseDelayUncapped = computeBackoffDelay(
+          resolvedConfig.backoffStrategy!,
+          attempt,
+          resolvedConfig.baseDelayMs!
         );
-        const jittered = applyJitter(baseDelay, resolvedConfig.jitterStrategy!);
+        // Cap the base delay before applying jitter
+        const baseDelay = Math.min(baseDelayUncapped, resolvedConfig.maxDelayMs!); 
+        const jittered = applyJitter(baseDelay, resolvedConfig.jitterStrategy!, previousDelayMs, resolvedConfig.maxDelayMs!); // Pass maxDelayMs to jitter for decorrelated strategy
         const remainingTime = resolvedConfig.timeoutMs! - (Date.now() - startTime);
         const actualDelay = Math.max(0, Math.min(jittered, remainingTime));
 
@@ -134,7 +135,20 @@ export async function retry<T>(
   }
 }
 
-function applyJitter(delay: number, strategy: JitterStrategy): number {
+/**
+ * Applies a jitter strategy to a given delay.
+ * @param delay - The base delay in milliseconds (already capped by maxDelayMs from backoff calculation).
+ * @param strategy - The jitter strategy to apply.
+ * @param previousDelayMs - The actual delay that was used for the previous retry (for decorrelated jitter).
+ * @param maxDelayMs - The maximum allowed delay in milliseconds (used for decorrelated jitter's upper bound).
+ * @returns The jittered delay in milliseconds.
+ */
+export function applyJitter(
+  delay: number,
+  strategy: JitterStrategy,
+  previousDelayMs: number,
+  maxDelayMs: number
+): number {
   switch (strategy) {
     case 'none':
       return delay;
@@ -142,6 +156,25 @@ function applyJitter(delay: number, strategy: JitterStrategy): number {
       return Math.random() * delay;
     case 'equal':
       return delay * 0.5 + Math.random() * delay * 0.5;
+    case 'decorrelated':
+      // For the first retry (previousDelayMs is 0), behave like full jitter within the current delay.
+      if (previousDelayMs <= 0) {
+        return Math.random() * delay;
+      } else {
+        // The next delay is a random value between the current base delay and previousDelay * 3,
+        // capped by maxDelayMs.
+        const lowerBound = delay; // The current calculated base delay
+        const upperBound = Math.min(previousDelayMs * 3, maxDelayMs);
+        
+        // Ensure lowerBound is not greater than upperBound to avoid negative range for Math.random
+        // If baseDelay is very high and previousDelay was very low, lowerBound could be > upperBound.
+        // In such cases, we should just return the lowerBound (or upperBound if it's smaller).
+        if (lowerBound >= upperBound) {
+          return lowerBound; // Or upperBound, whichever is smaller or desired behavior.
+                            // For decorrelated, it should generally be between base and prev*3. If base is higher, use base.
+        }
+        return lowerBound + Math.random() * (upperBound - lowerBound);
+      }
     default:
       const exhaustiveCheck: never = strategy;
       throw new Error(`Invalid jitter strategy: ${exhaustiveCheck}`);

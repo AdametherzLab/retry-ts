@@ -2,7 +2,8 @@
 export type JitterStrategy = 
   | 'none'   // No jitter
   | 'full'   // Random value between 0 and base delay
-  | 'equal'; // Random value between baseDelay/2 and baseDelay
+  | 'equal'  // Random value between baseDelay/2 and baseDelay
+  | 'decorrelated'; // Random value between baseDelay and previous delay * 3 (capped at maxDelayMs)
 
 /** Built-in backoff strategy names */
 export type BackoffStrategyName = 'exponential' | 'linear' | 'fixed';
@@ -28,6 +29,15 @@ export interface RetryConfig {
   readonly baseDelayMs?: number;
   readonly maxDelayMs?: number;
   readonly timeoutMs?: number;
+  /** 
+   * Jitter strategy for spreading out retry delays:
+   * - 'none': No randomization
+   * - 'full': Uniform random between 0 and calculated delay
+   * - 'equal': Random between delay/2 and delay
+   * - 'decorrelated': Random between the calculated base delay and previous actual delay * 3 (capped at maxDelayMs).
+   *                   On the first retry, it behaves like 'full' jitter.
+   * @default 'none'
+   */
   readonly jitterStrategy?: JitterStrategy;
   /**
    * Backoff strategy for computing delay between retries.
@@ -106,6 +116,7 @@ export function matchesErrorFilter(error: unknown, filter: ErrorFilter): boolean
     if (typeof f === 'function' && f.prototype instanceof Error) {
       return error instanceof (f as ErrorConstructor);
     }
+    // If it's not an ErrorConstructor, it must be an ErrorPredicate
     return (f as ErrorPredicate)(error);
   });
 }

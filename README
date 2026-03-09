@@ -1,0 +1,88 @@
+# retry-ts 🔄
+
+[![CI](https://github.com/AdametherzLab/retry-ts/actions/workflows/ci.yml/badge.svg)](https://github.com/AdametherzLab/retry-ts/actions) [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue)](https://www.typescriptlang.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+**Type-Safe Retries with Custom Backoff Strategies, Jitter, and Abort Support**
+
+## Features
+
+- **Custom backoff strategies**: exponential, linear, fixed, or bring your own
+- Configurable jitter strategies (none, full, equal, decorrelated)
+- Timeout and AbortController support
+- Custom retry conditions via `shouldRetry`
+- Error filtering with `retryOn` and `abortOn` for granular control
+- Zero dependencies — pure TypeScript/ESM
+
+## Installation
+
+bash
+bun add @adametherzlab/retry-ts
+
+
+## Quick Start
+
+
+import { retry } from '@adametherzlab/retry-ts';
+
+const fetchData = async (signal: AbortSignal) => {
+  const response = await fetch('https://api.example.com/data', { signal });
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+  return response.json();
+};
+
+// Basic retry with exponential backoff and no jitter
+try(fetchData, {
+  maxAttempts: 3,
+  baseDelayMs: 200,
+});
+
+// Use linear backoff with decorrelated jitter
+const data = await retry(fetchData, {
+  maxAttempts: 5,
+  baseDelayMs: 100,
+  maxDelayMs: 5000,
+  backoffStrategy: 'linear',
+  jitterStrategy: 'decorrelated'
+});
+
+console.log('Data fetched:', data);
+
+// Retry only on specific errors
+class NetworkError extends Error {}
+
+const flakyOperation = async () => {
+  if (Math.random() < 0.7) {
+    throw new NetworkError('Connection lost');
+  }
+  return 'Success!';
+};
+
+try(flakyOperation, {
+  maxAttempts: 5,
+  retryOn: NetworkError, // Only retry if NetworkError is thrown
+  baseDelayMs: 50,
+  jitterStrategy: 'full'
+});
+
+// Abort retries if a specific error occurs
+class AuthError extends Error {}
+
+const authProtectedOperation = async () => {
+  if (Math.random() < 0.5) {
+    throw new NetworkError('Connection lost');
+  } else if (Math.random() < 0.2) {
+    throw new AuthError('Unauthorized');
+  }
+  return 'Authorized data!';
+};
+
+try(authProtectedOperation, {
+  maxAttempts: 5,
+  retryOn: NetworkError,
+  abortOn: AuthError, // Stop immediately if AuthError is thrown
+  baseDelayMs: 50,
+  jitterStrategy: 'equal'
+});
+
