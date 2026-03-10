@@ -30,3 +30,4 @@ export type {
 
 export { RetryError, matchesErrorFilter, computeBackoffDelay } from './types.js';
 export { retry } from './retry.js';
+export { CircuitBreaker } from './circuit.js';

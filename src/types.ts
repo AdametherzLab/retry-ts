@@ -1,3 +1,5 @@
+import { CircuitBreaker } from './circuit.js';
+
 /** Configuration options for retry behavior */
 export interface RetryConfig {
   readonly maxAttempts?: number;
@@ -7,16 +9,6 @@ export interface RetryConfig {
   readonly jitterStrategy?: JitterStrategy;
   readonly backoffStrategy?: BackoffStrategy;
   readonly abortSignal?: AbortSignal;
-  /**
-   * Custom predicate to determine if a retry should occur. Receives context with
-   * error details, attempt count, and timing information. Return false to abort retries.
-   * @example
-   * // Retry only on 429 errors
-   * shouldRetry: ({ error }) => error instanceof MyError && error.code === 429
-   * @example
-   * // Retry first 3 attempts regardless of error
-   * shouldRetry: ({ attempt }) => attempt <= 3
-   */
   readonly shouldRetry?: (context: RetryContext) => boolean | Promise<boolean>;
   readonly retryOn?: ErrorFilter;
   readonly abortOn?: ErrorFilter;
@@ -24,24 +16,12 @@ export interface RetryConfig {
   readonly logger?: RetryLogger;
   readonly retryLogLevel?: LogLevel;
   readonly logSuccess?: boolean;
-}
-
-/** Context provided to shouldRetry predicate */
-export interface RetryContext {
-  /** Error that caused the retry */
-  readonly error: unknown;
-  /** Current attempt number (1-indexed) */
-  readonly attempt: number;
-  /** Milliseconds elapsed since first attempt */
-  readonly elapsedTimeMs: number;
-  /** Previous actual delay used (after jitter) */
-  readonly previousDelayMs: number;
-}
-
-/** Context provided to onRetry callback */
-export interface RetryCallbackContext extends RetryContext {
-  /** Delay in milliseconds before next attempt */
-  readonly delayMs: number;
+  /**
+   * An optional CircuitBreaker instance to integrate with the retry mechanism.
+   * If provided, the retry function will consult the circuit breaker before each attempt
+   * and update its state based on success or failure.
+   */
+  readonly circuitBreaker?: CircuitBreaker;
 }
 
 export type JitterStrategy =
@@ -67,6 +47,34 @@ export type ErrorFilter = ErrorConstructor | ErrorPredicate | Array<ErrorConstru
 export type ErrorConstructor = new (...args: any[]) => Error;
 
 export type ErrorPredicate = (error: unknown) => boolean;
+
+/** Context provided to the `shouldRetry` callback. */
+export interface RetryContext {
+  /** The error that occurred in the last attempt. */
+  readonly error: unknown;
+  /** The current attempt number (1-indexed). */
+  readonly attempt: number;
+  /** The total elapsed time in milliseconds since the first attempt started. */
+  readonly elapsedTimeMs: number;
+  /** The delay in milliseconds that was used before the current attempt. */
+  readonly previousDelayMs: number;
+}
+
+/** Context provided to the `onRetry` callback. */
+export interface RetryCallbackContext extends RetryContext {
+  /** The calculated delay in milliseconds before the next retry attempt. */
+  readonly delayMs: number;
+}
+
+/** Result of a successful retry operation. */
+export interface RetryResult<T> {
+  /** The value returned by the successful operation. */
+  readonly value: T;
+  /** The number of attempts it took to succeed. */
+  readonly attempts: number;
+  /** The total elapsed time in milliseconds from the start of the first attempt to the successful completion. */
+  readonly elapsedTimeMs: number;
+}
 
 export interface RetryLogger {
   debug?: LogMethod;
@@ -104,26 +112,40 @@ export class RetryError extends Error {
   }
 }
 
+/**
+ * Checks if an error matches a given filter.
+ * @param error - The error to check.
+ * @param filter - The filter to apply. Can be an ErrorConstructor, a predicate function, or an array of either.
+ * @returns True if the error matches the filter, false otherwise.
+ */
 export function matchesErrorFilter(error: unknown, filter: ErrorFilter): boolean {
   const filters = Array.isArray(filter) ? filter : [filter];
   return filters.some(f => {
-    switch (typeof f) {
-      case 'function':
-        return error instanceof f;
-      case 'object':
-        return f(error);
-      default:
-        return false;
+    if (typeof f === 'function' && f.prototype instanceof Error) {
+      // This is an ErrorConstructor
+      return error instanceof (f as ErrorConstructor);
+    } else if (typeof f === 'function') {
+      // This is an ErrorPredicate function
+      return (f as ErrorPredicate)(error);
     }
+    return false;
   });
 }
 
+/**
+ * Computes the backoff delay based on the specified strategy.
+ * @param strategy - The backoff strategy to use.
+ * @param attempt - The current attempt number (1-indexed).
+ * @param baseDelayMs - The base delay in milliseconds.
+ * @returns The calculated delay in milliseconds.
+ * @throws {Error} If an invalid backoff strategy is provided.
+ */
 export function computeBackoffDelay(
   strategy: BackoffStrategy,
   attempt: number,
   baseDelayMs: number
 ): number {
-  algorithm: switch (strategy) {
+  switch (strategy) {
     case 'exponential':
       return baseDelayMs * Math.pow(2, attempt - 1);
     case 'linear':

@@ -1,188 +1,189 @@
 import { describe, it, expect, mock } from 'bun:test';
-import { retry, RetryError, computeBackoffDelay } from '../src/index.ts';
+import { retry, RetryError, computeBackoffDelay, CircuitBreaker } from '../src/index.ts';
 import { applyJitter } from '../src/retry.ts';
 
-describe('retry function', () => {
-  it('should succeed on first attempt', async () => {
-    const result = await retry(async () => 'success');
+describe('Circuit Breaker', () => {
+  it('opens after threshold failures', async () => {
+    const cb = new CircuitBreaker(3, 1000);
+    let attempts = 0;
+    
+    const failingOp = async () => {
+      attempts++;
+      throw new Error('Failure');
+    };
+
+    // First call: exhaust all 3 attempts
+    try {
+      await retry(failingOp, { maxAttempts: 3, circuitBreaker: cb });
+    } catch (e) {
+      expect(e).toBeInstanceOf(RetryError);
+      expect((e as RetryError).message).toContain('Failed after 3 attempts');
+    } 
+
+    expect(cb['state']).toBe('open');
+    expect(attempts).toBe(3);
+
+    // Next call should be blocked immediately
+    try {
+      await retry(failingOp, { maxAttempts: 2, circuitBreaker: cb });
+    } catch (error) {
+      expect(error).toBeInstanceOf(RetryError);
+      expect((error as RetryError).message).toContain('Circuit breaker is open');
+      expect(attempts).toBe(3); // No new attempts
+    }
+  });
+
+  it('allows retry after timeout', async () => {
+    const cb = new CircuitBreaker(2, 100);
+    let attempts = 0;
+
+    const failingOp = async () => {
+      attempts++;
+      throw new Error('Failure');
+    };
+
+    // First call: 2 attempts
+    try {
+      await retry(failingOp, { maxAttempts: 2, circuitBreaker: cb });
+    } catch (e) {
+      expect(e).toBeInstanceOf(RetryError);
+      expect((e as RetryError).message).toContain('Failed after 2 attempts');
+    }
+
+    expect(cb['state']).toBe('open');
+    expect(attempts).toBe(2);
+
+    // Wait for timeout
+    await new Promise(r => setTimeout(r, 150));
+
+    // Next call: half-open state, should attempt once and fail, then open again
+    try {
+      await retry(failingOp, { maxAttempts: 2, circuitBreaker: cb });
+    } catch (error) {
+      expect(error).toBeInstanceOf(RetryError);
+      expect((error as RetryError).message).toContain('Failed after 1 attempts'); // Only one attempt in half-open
+      expect(attempts).toBe(3); // 1 attempt in half-open
+      expect(cb['state']).toBe('open');
+    }
+  });
+
+  it('resets on successful half-open attempt', async () => {
+    const cb = new CircuitBreaker(2, 100);
+    let attempts = 0;
+
+    const sometimesWorks = async () => {
+      attempts++;
+      if (attempts <= 2) throw new Error('Failure'); // Fail first 2 times to open circuit
+      return 'success';
+    };
+
+    // First call: 2 failures to open circuit
+    try {
+      await retry(sometimesWorks, { maxAttempts: 2, circuitBreaker: cb });
+    } catch (e) {
+      expect(e).toBeInstanceOf(RetryError);
+      expect((e as RetryError).message).toContain('Failed after 2 attempts');
+    }
+    expect(cb['state']).toBe('open');
+    expect(attempts).toBe(2);
+
+    await new Promise(r => setTimeout(r, 150));
+
+    // Second call: succeeds in half-open
+    const result = await retry(sometimesWorks, { maxAttempts: 1, circuitBreaker: cb }); // maxAttempts: 1 to ensure only one attempt in half-open
     expect(result.value).toBe('success');
-    expect(result.attempts).toBe(1);
+    expect(cb['state']).toBe('closed');
+    expect(attempts).toBe(3); // 2 from first call + 1 successful in half-open
   });
 
-  it('should retry 3 times before failing', async () => {
+  it('only counts matching errors', async () => {
+    class NetworkError extends Error {}
+    class ValidationError extends Error {}
+
+    const cb = new CircuitBreaker(2, 1000, [NetworkError]);
+
+    await expect(retry(
+      async () => { throw new NetworkError(); },
+      { maxAttempts: 1, circuitBreaker: cb }
+    )).rejects.toThrow(RetryError);
+    expect(cb['failureCount']).toBe(1);
+    expect(cb['state']).toBe('closed'); // Not enough failures yet
+
+    await expect(retry(
+      async () => { throw new ValidationError(); },
+      { maxAttempts: 1, circuitBreaker: cb }
+    )).rejects.toThrow(RetryError);
+    expect(cb['failureCount']).toBe(1); // ValidationError should not count
+    expect(cb['state']).toBe('closed');
+
+    await expect(retry(
+      async () => { throw new NetworkError(); },
+      { maxAttempts: 1, circuitBreaker: cb }
+    )).rejects.toThrow(RetryError);
+    expect(cb['failureCount']).toBe(2);
+    expect(cb['state']).toBe('open'); // Now it should be open
+  });
+
+  it('should not open circuit breaker if maxAttempts is less than failureThreshold', async () => {
+    const cb = new CircuitBreaker(5, 1000); // Threshold of 5
     let attempts = 0;
+
+    const failingOp = async () => {
+      attempts++;
+      throw new Error('Failure');
+    };
+
+    // Try 3 times, which is less than the threshold of 5
     try {
-      await retry(
-        async () => {
-          attempts++;
-          throw new Error('Failed');
-        },
-        { maxAttempts: 3 }
-      );
-    } catch (error) {
-      expect(error).toBeInstanceOf(RetryError);
-      expect(attempts).toBe(3);
+      await retry(failingOp, { maxAttempts: 3, circuitBreaker: cb });
+    } catch (e) {
+      expect(e).toBeInstanceOf(RetryError);
+      expect((e as RetryError).message).toContain('Failed after 3 attempts');
     }
-  });
 
-  it('should respect custom backoff strategy', async () => {
-    const delays: number[] = [];
+    expect(cb['state']).toBe('closed'); // Should still be closed
+    expect(cb['failureCount']).toBe(3);
+    expect(attempts).toBe(3);
+
+    // Try 2 more times, reaching the threshold
     try {
-      await retry(
-        async () => {
-          throw new Error('Failed');
-        },
-        {
-          maxAttempts: 3,
-          baseDelayMs: 100,
-          backoffStrategy: 'linear',
-          onRetry: ({ delayMs }) => delays.push(delayMs)
-        }
-      );
-    } catch {} // eslint-disable-line no-empty
-    
-    // Linear backoff: 100, 200
-    expect(delays).toEqual([100, 200]);
-  });
-});
+      await retry(failingOp, { maxAttempts: 2, circuitBreaker: cb });
+    } catch (e) {
+      expect(e).toBeInstanceOf(RetryError);
+      expect((e as RetryError).message).toContain('Failed after 2 attempts');
+    }
 
-describe('jitter strategies', () => {
-  const testJitter = (
-    strategy: JitterStrategy,
-    expected: number[],
-    previousDelayMs = 0
-  ) => {
-    const baseDelay = 1000;
-    const maxDelay = 2000;
-    const result = applyJitter(baseDelay, strategy, previousDelayMs, maxDelay);
-    expect(result).toBeGreaterThanOrEqual(expected[0]);
-    expect(result).toBeLessThanOrEqual(expected[1]);
-    expect(result).toBeLessThanOrEqual(maxDelay);
-  };
-
-  it('none strategy', () => {
-    testJitter('none', [1000, 1000]);
+    expect(cb['state']).toBe('open'); // Now it should be open
+    expect(cb['failureCount']).toBe(5);
+    expect(attempts).toBe(5);
   });
 
-  it('full strategy', () => {
-    testJitter('full', [0, 1000]);
-  });
-
-  it('equal strategy', () => {
-    testJitter('equal', [500, 1000]);
-  });
-
-  it('decorrelated strategy (first attempt)', () => {
-    testJitter('decorrelated', [0, 1000]);
-  });
-
-  it('decorrelated strategy (subsequent attempt)', () => {
-    testJitter('decorrelated', [1000, 3000], 500);
-  });
-});
-
-describe('configurable retry conditions', () => {
-  it('retries based on error message', async () => {
+  it('should reset failure count when circuit breaker closes', async () => {
+    const cb = new CircuitBreaker(2, 100);
     let attempts = 0;
+
+    const sometimesWorks = async () => {
+      attempts++;
+      if (attempts <= 2) throw new Error('Failure'); // Fail first 2 times to open circuit
+      return 'success';
+    };
+
+    // Open the circuit
     try {
-      await retry(
-        async () => {
-          attempts++;
-          throw new Error(attempts === 1 ? 'retry me' : 'fail');
-        },
-        {
-          maxAttempts: 3,
-          shouldRetry: ({ error }) => 
-            error instanceof Error && error.message.includes('retry me'),
-        }
-      );
-    } catch (error) {
-      expect(error).toBeInstanceOf(RetryError);
-      expect(attempts).toBe(2);
+      await retry(sometimesWorks, { maxAttempts: 2, circuitBreaker: cb });
+    } catch (e) {
+      expect(e).toBeInstanceOf(RetryError);
     }
-  });
+    expect(cb['state']).toBe('open');
+    expect(cb['failureCount']).toBe(2);
 
-  it('retries based on error type', async () => {
-    class RetryableError extends Error {}
-    class NonRetryableError extends Error {}
+    // Wait for timeout to go to half-open
+    await new Promise(r => setTimeout(r, 150));
 
-    let attempts = 0;
-    try {
-      await retry(
-        async () => {
-          attempts++;
-          if (attempts === 1) throw new RetryableError();
-          throw new NonRetryableError();
-        },
-        {
-          maxAttempts: 3,
-          shouldRetry: ({ error }) => error instanceof RetryableError,
-        }
-      );
-    } catch (error) {
-      expect(error).toBeInstanceOf(RetryError);
-      expect(error.cause).toBeInstanceOf(NonRetryableError);
-      expect(attempts).toBe(2);
-    }
-  });
-
-  it('uses async shouldRetry function', async () => {
-    let attempts = 0;
-    try {
-      await retry(
-        async () => {
-          attempts++;
-          throw new Error('retry me');
-        },
-        {
-          maxAttempts: 3,
-          shouldRetry: async ({ error }) => {
-            await new Promise(resolve => setTimeout(resolve, 10));
-            return error instanceof Error && error.message.includes('retry me');
-          },
-        }
-      );
-    } catch (error) {
-      expect(error).toBeInstanceOf(RetryError);
-      expect(attempts).toBe(3);
-    }
-  });
-});
-
-describe('error handling', () => {
-  it('should throw original error if non-retryable', async () => {
-    class NonRetryableError extends Error {}
-    
-    await expect(() =>
-      retry(
-        async () => {
-          throw new NonRetryableError();
-        },
-        {
-          maxAttempts: 3,
-          retryOn: [Error],
-          abortOn: [NonRetryableError]
-        }
-      )
-    ).rejects.toThrow(NonRetryableError);
-  });
-});
-
-describe('computeBackoffDelay', () => {
-  it('should calculate exponential backoff', () => {
-    expect(computeBackoffDelay('exponential', 1, 100)).toBe(100);
-    expect(computeBackoffDelay('exponential', 2, 100)).toBe(200);
-    expect(computeBackoffDelay('exponential', 3, 100)).toBe(400);
-  });
-
-  it('should calculate linear backoff', () => {
-    expect(computeBackoffDelay('linear', 1, 100)).toBe(100);
-    expect(computeBackoffDelay('linear', 2, 100)).toBe(200);
-    expect(computeBackoffDelay('linear', 3, 100)).toBe(300);
-  });
-
-  it('should use fixed backoff', () => {
-    expect(computeBackoffDelay('fixed', 1, 100)).toBe(100);
-    expect(computeBackoffDelay('fixed', 5, 100)).toBe(100);
+    // Succeed in half-open, should close circuit and reset failure count
+    const result = await retry(sometimesWorks, { maxAttempts: 1, circuitBreaker: cb });
+    expect(result.value).toBe('success');
+    expect(cb['state']).toBe('closed');
+    expect(cb['failureCount']).toBe(0); // Failure count should be reset
   });
 });

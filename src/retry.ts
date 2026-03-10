@@ -6,6 +6,7 @@ import type {
   BackoffStrategy,
 } from './types.js';
 import { RetryError, matchesErrorFilter, computeBackoffDelay } from './types.js';
+import { CircuitBreaker } from './circuit.js';
 
 /**
  * Applies a jitter strategy to a given delay.
@@ -55,40 +56,18 @@ export function applyJitter(
 }
 
 /**
- * Executes an async operation with retry capabilities based on configurable backoff and jitter.
+ * Executes an async operation with retry capabilities.
  * @param operation - Async function to execute. Receives AbortSignal for cancellation
  * @param config - Configuration for retry behavior
  * @returns Promise resolving to operation result with retry metadata
  * @throws {RetryError} When all attempts fail or operation is aborted/timed out
- * @example
- * const data = await retry(fetchData, { maxAttempts: 3, baseDelayMs: 100 });
- * @example
- * // Use linear backoff with custom jitter
- * const data = await retry(fetchData, { 
- *   maxAttempts: 5,
- *   backoffStrategy: 'linear',
- *   jitterStrategy: (delay) => delay * 0.8 + Math.random() * delay * 0.4
- * });
- * @example
- * // Monitor retry progress
- * const data = await retry(fetchData, {
- *   maxAttempts: 3,
- *   onRetry: ({ attempt, delayMs, error }) => {
- *     console.log(`Attempt ${attempt} failed, retrying in ${delayMs}ms:`, error);
- *   }
- * });
- * @example
- * // Use Winston logger
- * import { createLogger } from 'winston';
- * const logger = createLogger();
- * const data = await retry(fetchData, { maxAttempts: 3, logger });
  */
 export async function retry<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   config?: RetryConfig
 ): Promise<RetryResult<T>> {
-  const resolvedConfig: Required<Omit<RetryConfig, 'retryOn' | 'abortOn' | 'onRetry' | 'logger' | 'retryLogLevel' | 'logSuccess'>> & 
-    Pick<RetryConfig, 'retryOn' | 'abortOn' | 'onRetry' | 'logger' | 'retryLogLevel' | 'logSuccess'> = {
+  const resolvedConfig: Required<Omit<RetryConfig, 'retryOn' | 'abortOn' | 'onRetry' | 'logger' | 'retryLogLevel' | 'logSuccess' | 'circuitBreaker'>> & 
+    Pick<RetryConfig, 'retryOn' | 'abortOn' | 'onRetry' | 'logger' | 'retryLogLevel' | 'logSuccess' | 'circuitBreaker'> = {
     maxAttempts: config?.maxAttempts ?? 3,
     baseDelayMs: config?.baseDelayMs ?? 1000,
     maxDelayMs: config?.maxDelayMs ?? 30000,
@@ -103,6 +82,7 @@ export async function retry<T>(
     logger: config?.logger,
     retryLogLevel: config?.retryLogLevel ?? 'warn',
     logSuccess: config?.logSuccess ?? false,
+    circuitBreaker: config?.circuitBreaker,
   };
 
   validateConfig(resolvedConfig);
@@ -136,9 +116,23 @@ export async function retry<T>(
       }
 
       try {
+        if (resolvedConfig.circuitBreaker) {
+          const stateCheck = resolvedConfig.circuitBreaker.checkState();
+          if (stateCheck === 'block') {
+            throw new RetryError('Circuit breaker is open', {
+              cause: lastError ?? new Error('Circuit breaker blocked'),
+              attempts: attempt - 1,
+              elapsedTimeMs: Date.now() - startTime,
+            });
+          }
+        }
+
         const value = await operation(controller.signal);
         
-        // Log success if enabled
+        if (resolvedConfig.circuitBreaker) {
+          resolvedConfig.circuitBreaker.onSuccess();
+        }
+        
         if (resolvedConfig.logger?.info && resolvedConfig.logSuccess) {
           resolvedConfig.logger.info(`Operation succeeded after ${attempt} attempt(s)`, {
             attempts: attempt,
@@ -150,7 +144,10 @@ export async function retry<T>(
       } catch (error) {
         lastError = error;
 
-        // abortOn takes highest precedence — immediately fail
+        if (resolvedConfig.circuitBreaker) {
+          resolvedConfig.circuitBreaker.onFailure(error);
+        }
+
         if (resolvedConfig.abortOn && matchesErrorFilter(error, resolvedConfig.abortOn)) {
           throw new RetryError(`Aborted due to non-retryable error on attempt ${attempt}`, {
             cause: error,
@@ -159,7 +156,6 @@ export async function retry<T>(
           });
         }
 
-        // retryOn — if set, error must match to be retried
         if (resolvedConfig.retryOn && !matchesErrorFilter(error, resolvedConfig.retryOn)) {
           throw new RetryError(`Error not retryable on attempt ${attempt}`, {
             cause: error,
@@ -184,13 +180,11 @@ export async function retry<T>(
           attempt,
           resolvedConfig.baseDelayMs!
         );
-        // Cap the base delay before applying jitter
         const baseDelay = Math.min(baseDelayUncapped, resolvedConfig.maxDelayMs!); 
         const jittered = applyJitter(baseDelay, resolvedConfig.jitterStrategy!, previousDelayMs, resolvedConfig.maxDelayMs!);
         const remainingTime = resolvedConfig.timeoutMs! - (Date.now() - startTime);
         const actualDelay = Math.max(0, Math.min(jittered, remainingTime));
 
-        // Invoke progress callback if provided
         if (resolvedConfig.onRetry) {
           await resolvedConfig.onRetry({
             ...retryContext,
@@ -198,7 +192,6 @@ export async function retry<T>(
           });
         }
 
-        // Log retry attempt if logger is provided
         if (resolvedConfig.logger) {
           const level = resolvedConfig.retryLogLevel!;
           const logFn = resolvedConfig.logger[level] ?? resolvedConfig.logger.info;
@@ -221,9 +214,8 @@ export async function retry<T>(
       }
     }
 
-    // Log final failure if logger is provided
     if (resolvedConfig.logger?.error) {
-      resolvedConfig.logger.error(`Failed after ${resolvedConfig.maxAttempts} attempts`, {
+      resolvedConfig.logger.error(`Failed after ${attempt} attempts`, {
         attempts: attempt,
         error: lastError instanceof Error ? lastError.message : String(lastError),
         elapsedTimeMs: Date.now() - startTime,
