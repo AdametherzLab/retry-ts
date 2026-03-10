@@ -3,16 +3,14 @@ export type JitterStrategy =
   | 'none'   // No jitter
   | 'full'   // Random value between 0 and base delay
   | 'equal'  // Random value between baseDelay/2 and baseDelay
-  | 'decorrelated'; // Random value between baseDelay and previous delay * 3 (capped at maxDelayMs)
+  | 'decorrelated'
+  | ((delay: number, previousDelayMs: number, maxDelayMs: number) => number);
 
 /** Built-in backoff strategy names */
 export type BackoffStrategyName = 'exponential' | 'linear' | 'fixed';
 
 /** Custom backoff function: receives attempt number (1-based) and baseDelayMs, returns delay in ms */
 export type BackoffFunction = (attempt: number, baseDelayMs: number) => number;
-
-/** Backoff strategy — built-in name or custom function */
-export type BackoffStrategy = BackoffStrategyName | BackoffFunction;
 
 /** Error class constructor type for matching */
 export type ErrorConstructor = new (...args: any[]) => Error;
@@ -36,6 +34,7 @@ export interface RetryConfig {
    * - 'equal': Random between delay/2 and delay
    * - 'decorrelated': Random between the calculated base delay and previous actual delay * 3 (capped at maxDelayMs).
    *                   On the first retry, it behaves like 'full' jitter.
+   * - Custom function: (delay, previousDelayMs, maxDelayMs) => number
    * @default 'none'
    */
   readonly jitterStrategy?: JitterStrategy;

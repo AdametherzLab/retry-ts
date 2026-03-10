@@ -8,6 +8,53 @@ import type {
 import { RetryError, matchesErrorFilter, computeBackoffDelay } from './types.js';
 
 /**
+ * Applies a jitter strategy to a given delay.
+ * @param delay - The base delay in milliseconds (already capped by maxDelayMs from backoff calculation).
+ * @param strategy - The jitter strategy to apply.
+ * @param previousDelayMs - The actual delay that was used for the previous retry (for decorrelated jitter).
+ * @param maxDelayMs - The maximum allowed delay in milliseconds (used for capping all strategies).
+ * @returns The jittered delay in milliseconds, capped at maxDelayMs.
+ */
+export function applyJitter(
+  delay: number,
+  strategy: JitterStrategy,
+  previousDelayMs: number,
+  maxDelayMs: number
+): number {
+  let jitteredDelay: number;
+
+  if (typeof strategy === 'function') {
+    jitteredDelay = strategy(delay, previousDelayMs, maxDelayMs);
+  } else {
+    switch (strategy) {
+      case 'none':
+        jitteredDelay = delay;
+        break;
+      case 'full':
+        jitteredDelay = Math.random() * delay;
+        break;
+      case 'equal':
+        jitteredDelay = delay * 0.5 + Math.random() * delay * 0.5;
+        break;
+      case 'decorrelated':
+        if (previousDelayMs <= 0) {
+          jitteredDelay = Math.random() * delay;
+        } else {
+          const upperBound = Math.min(previousDelayMs * 3, maxDelayMs);
+          const lowerBound = Math.min(delay, upperBound);
+          jitteredDelay = lowerBound + Math.random() * (upperBound - lowerBound);
+        }
+        break;
+      default:
+        const exhaustiveCheck: never = strategy;
+        throw new Error(`Invalid jitter strategy: ${exhaustiveCheck}`);
+    }
+  }
+
+  return Math.min(jitteredDelay, maxDelayMs);
+}
+
+/**
  * Executes an async operation with retry capabilities based on configurable backoff and jitter.
  * @param operation - Async function to execute. Receives AbortSignal for cancellation
  * @param config - Configuration for retry behavior
@@ -16,11 +63,11 @@ import { RetryError, matchesErrorFilter, computeBackoffDelay } from './types.js'
  * @example
  * const data = await retry(fetchData, { maxAttempts: 3, baseDelayMs: 100 });
  * @example
- * // Use linear backoff with decorrelated jitter
+ * // Use linear backoff with custom jitter
  * const data = await retry(fetchData, { 
  *   maxAttempts: 5,
  *   backoffStrategy: 'linear',
- *   jitterStrategy: 'decorrelated'
+ *   jitterStrategy: (delay) => delay * 0.8 + Math.random() * delay * 0.4
  * });
  */
 export async function retry<T>(
@@ -112,7 +159,7 @@ export async function retry<T>(
         );
         // Cap the base delay before applying jitter
         const baseDelay = Math.min(baseDelayUncapped, resolvedConfig.maxDelayMs!); 
-        const jittered = applyJitter(baseDelay, resolvedConfig.jitterStrategy!, previousDelayMs, resolvedConfig.maxDelayMs!); // Pass maxDelayMs to jitter for decorrelated strategy
+        const jittered = applyJitter(baseDelay, resolvedConfig.jitterStrategy!, previousDelayMs, resolvedConfig.maxDelayMs!);
         const remainingTime = resolvedConfig.timeoutMs! - (Date.now() - startTime);
         const actualDelay = Math.max(0, Math.min(jittered, remainingTime));
 
@@ -132,52 +179,6 @@ export async function retry<T>(
     });
   } finally {
     resolvedConfig.abortSignal?.removeEventListener('abort', handleAbort);
-  }
-}
-
-/**
- * Applies a jitter strategy to a given delay.
- * @param delay - The base delay in milliseconds (already capped by maxDelayMs from backoff calculation).
- * @param strategy - The jitter strategy to apply.
- * @param previousDelayMs - The actual delay that was used for the previous retry (for decorrelated jitter).
- * @param maxDelayMs - The maximum allowed delay in milliseconds (used for decorrelated jitter's upper bound).
- * @returns The jittered delay in milliseconds.
- */
-export function applyJitter(
-  delay: number,
-  strategy: JitterStrategy,
-  previousDelayMs: number,
-  maxDelayMs: number
-): number {
-  switch (strategy) {
-    case 'none':
-      return delay;
-    case 'full':
-      return Math.random() * delay;
-    case 'equal':
-      return delay * 0.5 + Math.random() * delay * 0.5;
-    case 'decorrelated':
-      // For the first retry (previousDelayMs is 0), behave like full jitter within the current delay.
-      if (previousDelayMs <= 0) {
-        return Math.random() * delay;
-      } else {
-        // The next delay is a random value between the current base delay and previousDelay * 3,
-        // capped by maxDelayMs.
-        const lowerBound = delay; // The current calculated base delay
-        const upperBound = Math.min(previousDelayMs * 3, maxDelayMs);
-        
-        // Ensure lowerBound is not greater than upperBound to avoid negative range for Math.random
-        // If baseDelay is very high and previousDelay was very low, lowerBound could be > upperBound.
-        // In such cases, we should just return the lowerBound (or upperBound if it's smaller).
-        if (lowerBound >= upperBound) {
-          return lowerBound; // Or upperBound, whichever is smaller or desired behavior.
-                            // For decorrelated, it should generally be between base and prev*3. If base is higher, use base.
-        }
-        return lowerBound + Math.random() * (upperBound - lowerBound);
-      }
-    default:
-      const exhaustiveCheck: never = strategy;
-      throw new Error(`Invalid jitter strategy: ${exhaustiveCheck}`);
   }
 }
 
