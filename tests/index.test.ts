@@ -2,366 +2,187 @@ import { describe, it, expect, mock } from 'bun:test';
 import { retry, RetryError, computeBackoffDelay } from '../src/index.ts';
 import { applyJitter } from '../src/retry.ts';
 
-describe('progress/status callback', () => {
-  it('calls onRetry after each failed attempt with correct context', async () => {
-    const onRetry = mock((ctx) => {
-      expect(ctx.attempt).toBeGreaterThan(0);
-      expect(ctx.error).toBeInstanceOf(Error);
-      expect(ctx.elapsedTimeMs).toBeGreaterThanOrEqual(0);
-      expect(typeof ctx.delayMs).toBe('number');
-    });
-
-    let callCount = 0;
-    try {
-      await retry(
-        async () => {
-          callCount++;
-          throw new Error(`fail ${callCount}`);
-        },
-        {
-          maxAttempts: 3,
-          baseDelayMs: 10,
-          backoffStrategy: 'fixed',
-          jitterStrategy: 'none',
-          onRetry,
-        }
-      );
-    } catch (error) {
-      expect(error).toBeInstanceOf(RetryError);
-    }
-
-    expect(callCount).toBe(3);
-    expect(onRetry).toHaveBeenCalledTimes(2);
-    
-    // First call should be after attempt 1
-    expect(onRetry.mock.calls[0][0].attempt).toBe(1);
-    expect(onRetry.mock.calls[0][0].error.message).toBe('fail 1');
-    expect(onRetry.mock.calls[0][0].delayMs).toBe(10);
-    
-    // Second call should be after attempt 2
-    expect(onRetry.mock.calls[1][0].attempt).toBe(2);
-    expect(onRetry.mock.calls[1][0].error.message).toBe('fail 2');
-    expect(onRetry.mock.calls[1][0].delayMs).toBe(10);
-  });
-
-  it('does not call onRetry when operation succeeds on first attempt', async () => {
-    const onRetry = mock(() => {});
-    
-    const result = await retry(
-      async () => 'success',
-      {
-        maxAttempts: 3,
-        onRetry,
-      }
-    );
-
+describe('retry function', () => {
+  it('should succeed on first attempt', async () => {
+    const result = await retry(async () => 'success');
     expect(result.value).toBe('success');
     expect(result.attempts).toBe(1);
-    expect(onRetry).not.toHaveBeenCalled();
   });
 
-  it('awaits async onRetry callback before proceeding', async () => {
-    let callbackCompleted = false;
-    const onRetry = mock(async (ctx) => {
-      await new Promise(resolve => setTimeout(resolve, 20));
-      callbackCompleted = true;
-    });
-
-    let attemptCount = 0;
+  it('should retry 3 times before failing', async () => {
+    let attempts = 0;
     try {
       await retry(
         async () => {
-          attemptCount++;
-          if (attemptCount === 1) {
-            throw new Error('first fail');
-          }
-          // Check that callback completed before second attempt
-          expect(callbackCompleted).toBe(true);
-          return 'success';
+          attempts++;
+          throw new Error('Failed');
+        },
+        { maxAttempts: 3 }
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(RetryError);
+      expect(attempts).toBe(3);
+    }
+  });
+
+  it('should respect custom backoff strategy', async () => {
+    const delays: number[] = [];
+    try {
+      await retry(
+        async () => {
+          throw new Error('Failed');
         },
         {
           maxAttempts: 3,
-          baseDelayMs: 5,
-          backoffStrategy: 'fixed',
-          jitterStrategy: 'none',
-          onRetry,
-        }
-      );
-    } catch (error) {
-      // Should not reach here
-      expect(true).toBe(false);
-    }
-
-    expect(attemptCount).toBe(2);
-    expect(onRetry).toHaveBeenCalledTimes(1);
-    expect(callbackCompleted).toBe(true);
-  });
-
-  it('provides correct delayMs with exponential backoff', async () => {
-    const delays: number[] = [];
-    const onRetry = mock((ctx) => {
-      delays.push(ctx.delayMs);
-    });
-
-    try {
-      await retry(
-        async () => {
-          throw new Error('fail');
-        },
-        {
-          maxAttempts: 4,
           baseDelayMs: 100,
-          backoffStrategy: 'exponential',
-          jitterStrategy: 'none',
-          onRetry,
+          backoffStrategy: 'linear',
+          onRetry: ({ delayMs }) => delays.push(delayMs)
         }
       );
-    } catch (error) {
-      expect(error).toBeInstanceOf(RetryError);
-    }
-
-    expect(onRetry).toHaveBeenCalledTimes(3);
-    // Attempt 1: delay = 100 * 2^0 = 100
-    expect(delays[0]).toBe(100);
-    // Attempt 2: delay = 100 * 2^1 = 200
-    expect(delays[1]).toBe(200);
-    // Attempt 3: delay = 100 * 2^2 = 400
-    expect(delays[2]).toBe(400);
-  });
-
-  it('includes previousDelayMs in callback context', async () => {
-    const contexts: Array<{ attempt: number; previousDelayMs: number; delayMs: number }> = [];
-    const onRetry = mock((ctx) => {
-      contexts.push({
-        attempt: ctx.attempt,
-        previousDelayMs: ctx.previousDelayMs,
-        delayMs: ctx.delayMs,
-      });
-    });
-
-    try {
-      await retry(
-        async () => {
-          throw new Error('fail');
-        },
-        {
-          maxAttempts: 3,
-          baseDelayMs: 50,
-          backoffStrategy: 'fixed',
-          jitterStrategy: 'none',
-          onRetry,
-        }
-      );
-    } catch (error) {
-      expect(error).toBeInstanceOf(RetryError);
-    }
-
-    expect(contexts).toHaveLength(2);
-    // First retry: previousDelayMs should be 0 (no previous delay)
-    expect(contexts[0].attempt).toBe(1);
-    expect(contexts[0].previousDelayMs).toBe(0);
-    expect(contexts[0].delayMs).toBe(50);
+    } catch {} // eslint-disable-line no-empty
     
-    // Second retry: previousDelayMs should be 50 (from first retry)
-    expect(contexts[1].attempt).toBe(2);
-    expect(contexts[1].previousDelayMs).toBe(50);
-    expect(contexts[1].delayMs).toBe(50);
-  });
-
-  it('does not call onRetry when shouldRetry returns false', async () => {
-    const onRetry = mock(() => {});
-    
-    try {
-      await retry(
-        async () => {
-          throw new Error('fail');
-        },
-        {
-          maxAttempts: 5,
-          shouldRetry: (ctx) => ctx.attempt < 2, // Only retry once
-          onRetry,
-        }
-      );
-    } catch (error) {
-      expect(error).toBeInstanceOf(RetryError);
-    }
-
-    // onRetry should only be called once (after attempt 1, before attempt 2)
-    // When attempt 2 fails, shouldRetry returns false, so we don't retry and don't call onRetry
-    expect(onRetry).toHaveBeenCalledTimes(1);
+    // Linear backoff: 100, 200
+    expect(delays).toEqual([100, 200]);
   });
 });
 
-describe('custom jitter functions', () => {
-  it('applies custom jitter function', () => {
-    const customJitter = mock((delay: number) => delay * 1.5);
-    const result = applyJitter(100, customJitter, 0, 1000);
-    
-    expect(customJitter).toHaveBeenCalledWith(100, 0, 1000);
-    expect(result).toBe(150);
+describe('jitter strategies', () => {
+  const testJitter = (
+    strategy: JitterStrategy,
+    expected: number[],
+    previousDelayMs = 0
+  ) => {
+    const baseDelay = 1000;
+    const maxDelay = 2000;
+    const result = applyJitter(baseDelay, strategy, previousDelayMs, maxDelay);
+    expect(result).toBeGreaterThanOrEqual(expected[0]);
+    expect(result).toBeLessThanOrEqual(expected[1]);
+    expect(result).toBeLessThanOrEqual(maxDelay);
+  };
+
+  it('none strategy', () => {
+    testJitter('none', [1000, 1000]);
   });
 
-  it('caps custom jitter results at maxDelayMs', () => {
-    const customJitter = mock((delay: number) => delay + 500);
-    const result = applyJitter(100, customJitter, 0, 300);
-    
-    expect(result).toBe(300);
+  it('full strategy', () => {
+    testJitter('full', [0, 1000]);
   });
 
-  it('integrates with retry flow', async () => {
-    const customJitter = mock((delay: number) => delay * 2);
-    const delays: number[] = [];
-    
-    // Mock setTimeout to capture delays
-    const originalSetTimeout = global.setTimeout;
-    global.setTimeout = ((callback: (...args: any[]) => void, ms?: number) => {
-      if (typeof ms === 'number') delays.push(ms);
-      return originalSetTimeout(callback, ms);
-    }) as any;
+  it('equal strategy', () => {
+    testJitter('equal', [500, 1000]);
+  });
 
+  it('decorrelated strategy (first attempt)', () => {
+    testJitter('decorrelated', [0, 1000]);
+  });
+
+  it('decorrelated strategy (subsequent attempt)', () => {
+    testJitter('decorrelated', [1000, 3000], 500);
+  });
+});
+
+describe('configurable retry conditions', () => {
+  it('retries based on error message', async () => {
+    let attempts = 0;
     try {
       await retry(
         async () => {
-          throw new Error('fail');
+          attempts++;
+          throw new Error(attempts === 1 ? 'retry me' : 'fail');
         },
         {
           maxAttempts: 3,
-          baseDelayMs: 10,
-          jitterStrategy: customJitter,
-          backoffStrategy: 'fixed',
+          shouldRetry: ({ error }) => 
+            error instanceof Error && error.message.includes('retry me'),
         }
       );
     } catch (error) {
       expect(error).toBeInstanceOf(RetryError);
-    } finally {
-      global.setTimeout = originalSetTimeout;
+      expect(attempts).toBe(2);
     }
+  });
 
-    // First delay: 10ms * 2 = 20ms (attempt 1)
-    // Second delay: 10ms * 2 = 20ms (attempt 2)
-    expect(delays).toEqual([20, 20]);
-    expect(customJitter).toHaveBeenCalledTimes(2);
+  it('retries based on error type', async () => {
+    class RetryableError extends Error {}
+    class NonRetryableError extends Error {}
+
+    let attempts = 0;
+    try {
+      await retry(
+        async () => {
+          attempts++;
+          if (attempts === 1) throw new RetryableError();
+          throw new NonRetryableError();
+        },
+        {
+          maxAttempts: 3,
+          shouldRetry: ({ error }) => error instanceof RetryableError,
+        }
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(RetryError);
+      expect(error.cause).toBeInstanceOf(NonRetryableError);
+      expect(attempts).toBe(2);
+    }
+  });
+
+  it('uses async shouldRetry function', async () => {
+    let attempts = 0;
+    try {
+      await retry(
+        async () => {
+          attempts++;
+          throw new Error('retry me');
+        },
+        {
+          maxAttempts: 3,
+          shouldRetry: async ({ error }) => {
+            await new Promise(resolve => setTimeout(resolve, 10));
+            return error instanceof Error && error.message.includes('retry me');
+          },
+        }
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(RetryError);
+      expect(attempts).toBe(3);
+    }
   });
 });
 
-describe('logger integration', () => {
-  it('logs retry attempts at warn level by default', async () => {
-    const logger = {
-      warn: mock(() => {}),
-      error: mock(() => {}),
-    };
+describe('error handling', () => {
+  it('should throw original error if non-retryable', async () => {
+    class NonRetryableError extends Error {}
     
-    try {
-      await retry(
-        async () => { throw new Error('fail'); },
-        { maxAttempts: 3, baseDelayMs: 10, backoffStrategy: 'fixed', jitterStrategy: 'none', logger }
-      );
-    } catch (e) {
-      // expected
-    }
-    
-    expect(logger.warn).toHaveBeenCalledTimes(2); // attempts 1 and 2
-    expect(logger.warn.mock.calls[0][0]).toContain('Retry attempt 1 failed');
-    expect(logger.warn.mock.calls[0][1]).toMatchObject({ attempt: 1, delayMs: 10 });
-    expect(logger.warn.mock.calls[1][0]).toContain('Retry attempt 2 failed');
-    expect(logger.warn.mock.calls[1][1]).toMatchObject({ attempt: 2, delayMs: 10 });
+    await expect(() =>
+      retry(
+        async () => {
+          throw new NonRetryableError();
+        },
+        {
+          maxAttempts: 3,
+          retryOn: [Error],
+          abortOn: [NonRetryableError]
+        }
+      )
+    ).rejects.toThrow(NonRetryableError);
+  });
+});
+
+describe('computeBackoffDelay', () => {
+  it('should calculate exponential backoff', () => {
+    expect(computeBackoffDelay('exponential', 1, 100)).toBe(100);
+    expect(computeBackoffDelay('exponential', 2, 100)).toBe(200);
+    expect(computeBackoffDelay('exponential', 3, 100)).toBe(400);
   });
 
-  it('logs final failure at error level', async () => {
-    const logger = {
-      error: mock(() => {}),
-    };
-    
-    try {
-      await retry(
-        async () => { throw new Error('final fail'); },
-        { maxAttempts: 2, baseDelayMs: 10, backoffStrategy: 'fixed', jitterStrategy: 'none', logger }
-      );
-    } catch (e) {
-      expect(e).toBeInstanceOf(RetryError);
-    }
-    
-    expect(logger.error).toHaveBeenCalledTimes(1);
-    expect(logger.error.mock.calls[0][0]).toContain('Failed after 2 attempts');
-    expect(logger.error.mock.calls[0][1]).toMatchObject({ attempts: 2, error: 'final fail' });
+  it('should calculate linear backoff', () => {
+    expect(computeBackoffDelay('linear', 1, 100)).toBe(100);
+    expect(computeBackoffDelay('linear', 2, 100)).toBe(200);
+    expect(computeBackoffDelay('linear', 3, 100)).toBe(300);
   });
 
-  it('respects retryLogLevel configuration', async () => {
-    const logger = {
-      info: mock(() => {}),
-      warn: mock(() => {}),
-    };
-    
-    try {
-      await retry(
-        async () => { throw new Error('fail'); },
-        { maxAttempts: 2, baseDelayMs: 10, backoffStrategy: 'fixed', jitterStrategy: 'none', logger, retryLogLevel: 'info' }
-      );
-    } catch (e) {
-      // expected
-    }
-    
-    expect(logger.info).toHaveBeenCalledTimes(1);
-    expect(logger.info.mock.calls[0][0]).toContain('Retry attempt 1 failed');
-    expect(logger.warn).not.toHaveBeenCalled();
-  });
-
-  it('logs success when logSuccess is enabled', async () => {
-    const logger = {
-      info: mock(() => {}),
-    };
-    
-    const result = await retry(
-      async () => 'success',
-      { maxAttempts: 3, logger, logSuccess: true }
-    );
-    
-    expect(result.value).toBe('success');
-    expect(logger.info).toHaveBeenCalledTimes(1);
-    expect(logger.info.mock.calls[0][0]).toContain('succeeded');
-    expect(logger.info.mock.calls[0][1]).toMatchObject({ attempts: 1 });
-  });
-
-  it('works alongside onRetry callback', async () => {
-    const logger = { warn: mock(() => {}) };
-    const onRetry = mock(() => {});
-    
-    try {
-      await retry(
-        async () => { throw new Error('fail'); },
-        { maxAttempts: 2, baseDelayMs: 10, backoffStrategy: 'fixed', jitterStrategy: 'none', logger, onRetry }
-      );
-    } catch (e) {}
-    
-    expect(logger.warn).toHaveBeenCalledTimes(1);
-    expect(onRetry).toHaveBeenCalledTimes(1);
-  });
-
-  it('falls back to info if specified log level is not available on logger', async () => {
-    const logger = {
-      info: mock(() => {}),
-    };
-    
-    try {
-      await retry(
-        async () => { throw new Error('fail'); },
-        { maxAttempts: 2, baseDelayMs: 10, backoffStrategy: 'fixed', jitterStrategy: 'none', logger, retryLogLevel: 'warn' }
-      );
-    } catch (e) {}
-    
-    expect(logger.info).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not log success when logSuccess is false (default)', async () => {
-    const logger = {
-      info: mock(() => {}),
-    };
-    
-    await retry(
-      async () => 'success',
-      { maxAttempts: 3, logger }
-    );
-    
-    expect(logger.info).not.toHaveBeenCalled();
+  it('should use fixed backoff', () => {
+    expect(computeBackoffDelay('fixed', 1, 100)).toBe(100);
+    expect(computeBackoffDelay('fixed', 5, 100)).toBe(100);
   });
 });

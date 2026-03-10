@@ -223,14 +223,14 @@ export async function retry<T>(
 
     // Log final failure if logger is provided
     if (resolvedConfig.logger?.error) {
-      resolvedConfig.logger.error(`Failed after ${attempt} attempts`, {
+      resolvedConfig.logger.error(`Failed after ${resolvedConfig.maxAttempts} attempts`, {
         attempts: attempt,
         error: lastError instanceof Error ? lastError.message : String(lastError),
         elapsedTimeMs: Date.now() - startTime,
       });
     }
 
-    throw new RetryError(`Failed after ${resolvedConfig.maxAttempts} attempts`, {
+    throw new RetryError(`Failed after ${attempt} attempts`, {
       cause: lastError,
       attempts: attempt,
       elapsedTimeMs: Date.now() - startTime,
