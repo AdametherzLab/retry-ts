@@ -21,6 +21,20 @@ export type ErrorPredicate = (error: unknown) => boolean;
 /** Error filter — can be a single error class, predicate, or array of either */
 export type ErrorFilter = ErrorConstructor | ErrorPredicate | Array<ErrorConstructor | ErrorPredicate>;
 
+/** Context provided to shouldRetry predicate and onRetry callback */
+export interface RetryContext {
+  readonly error: unknown;
+  readonly attempt: number;
+  readonly elapsedTimeMs: number;
+  readonly previousDelayMs: number;
+}
+
+/** Context provided to onRetry callback including upcoming delay */
+export interface RetryCallbackContext extends RetryContext {
+  /** The delay in milliseconds before the next retry attempt */
+  readonly delayMs: number;
+}
+
 /** Configuration options for retry behavior */
 export interface RetryConfig {
   readonly maxAttempts?: number;
@@ -50,6 +64,16 @@ export interface RetryConfig {
   readonly abortSignal?: AbortSignal;
   readonly shouldRetry?: (context: RetryContext) => boolean | Promise<boolean>;
   /**
+   * Callback invoked after each failed attempt, before waiting for the next retry.
+   * Receives context about the failure and the delay before the next attempt.
+   * Useful for logging, monitoring, or updating UI with retry progress.
+   * @example
+   * onRetry: ({ attempt, error, delayMs }) => {
+   *   console.log(`Attempt ${attempt} failed, retrying in ${delayMs}ms...`);
+   * }
+   */
+  readonly onRetry?: (context: RetryCallbackContext) => void | Promise<void>;
+  /**
    * Only retry when the error matches this filter.
    * If an error does NOT match, it fails immediately without further retries.
    * Can be an Error subclass, a predicate function, or an array of either.
@@ -67,14 +91,6 @@ export interface RetryConfig {
    * abortOn: [AuthenticationError, (e) => e instanceof Error && e.message.includes('403')]
    */
   readonly abortOn?: ErrorFilter;
-}
-
-/** Context provided to shouldRetry predicate */
-export interface RetryContext {
-  readonly error: unknown;
-  readonly attempt: number;
-  readonly elapsedTimeMs: number;
-  readonly previousDelayMs: number;
 }
 
 /** Successful result with retry metadata */
@@ -147,3 +163,6 @@ export function computeBackoffDelay(
       throw new Error(`Invalid backoff strategy: ${_exhaustive}`);
   }
 }
+
+/** Backoff strategy type */
+export type BackoffStrategy = BackoffStrategyName | BackoffFunction;

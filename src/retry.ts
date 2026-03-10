@@ -69,12 +69,21 @@ export function applyJitter(
  *   backoffStrategy: 'linear',
  *   jitterStrategy: (delay) => delay * 0.8 + Math.random() * delay * 0.4
  * });
+ * @example
+ * // Monitor retry progress
+ * const data = await retry(fetchData, {
+ *   maxAttempts: 3,
+ *   onRetry: ({ attempt, delayMs, error }) => {
+ *     console.log(`Attempt ${attempt} failed, retrying in ${delayMs}ms:`, error);
+ *   }
+ * });
  */
 export async function retry<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   config?: RetryConfig
 ): Promise<RetryResult<T>> {
-  const resolvedConfig: Required<Omit<RetryConfig, 'retryOn' | 'abortOn'>> & Pick<RetryConfig, 'retryOn' | 'abortOn'> = {
+  const resolvedConfig: Required<Omit<RetryConfig, 'retryOn' | 'abortOn' | 'onRetry'>> & 
+    Pick<RetryConfig, 'retryOn' | 'abortOn' | 'onRetry'> = {
     maxAttempts: config?.maxAttempts ?? 3,
     baseDelayMs: config?.baseDelayMs ?? 1000,
     maxDelayMs: config?.maxDelayMs ?? 30000,
@@ -85,6 +94,7 @@ export async function retry<T>(
     shouldRetry: config?.shouldRetry ?? (() => true),
     retryOn: config?.retryOn,
     abortOn: config?.abortOn,
+    onRetry: config?.onRetry,
   };
 
   validateConfig(resolvedConfig);
@@ -162,6 +172,14 @@ export async function retry<T>(
         const jittered = applyJitter(baseDelay, resolvedConfig.jitterStrategy!, previousDelayMs, resolvedConfig.maxDelayMs!);
         const remainingTime = resolvedConfig.timeoutMs! - (Date.now() - startTime);
         const actualDelay = Math.max(0, Math.min(jittered, remainingTime));
+
+        // Invoke progress callback if provided
+        if (resolvedConfig.onRetry) {
+          await resolvedConfig.onRetry({
+            ...retryContext,
+            delayMs: actualDelay,
+          });
+        }
 
         if (actualDelay > 0) {
           await new Promise(r => setTimeout(r, actualDelay));
