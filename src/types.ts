@@ -21,6 +21,21 @@ export type ErrorPredicate = (error: unknown) => boolean;
 /** Error filter — can be a single error class, predicate, or array of either */
 export type ErrorFilter = ErrorConstructor | ErrorPredicate | Array<ErrorConstructor | ErrorPredicate>;
 
+/**
+ * Logger interface compatible with popular logging libraries like Winston, Pino, and Bunyan.
+ * All methods are optional - only the methods you provide will be used.
+ */
+export interface RetryLogger {
+  /** Log informational messages */
+  info?: (message: string, meta?: Record<string, unknown>) => void;
+  /** Log warning messages (used for retry attempts by default) */
+  warn?: (message: string, meta?: Record<string, unknown>) => void;
+  /** Log error messages (used for final failure) */
+  error?: (message: string, meta?: Record<string, unknown>) => void;
+  /** Log debug messages */
+  debug?: (message: string, meta?: Record<string, unknown>) => void;
+}
+
 /** Context provided to shouldRetry predicate and onRetry callback */
 export interface RetryContext {
   readonly error: unknown;
@@ -73,6 +88,25 @@ export interface RetryConfig {
    * }
    */
   readonly onRetry?: (context: RetryCallbackContext) => void | Promise<void>;
+  /**
+   * Optional logger for automatic retry logging. Compatible with Winston, Pino, and similar.
+   * When provided, retry attempts and final failures are automatically logged.
+   * @example
+   * import { createLogger } from 'winston';
+   * const logger = createLogger();
+   * await retry(operation, { maxAttempts: 3, logger });
+   */
+  readonly logger?: RetryLogger;
+  /**
+   * Log level for retry attempt messages. Uses 'warn' by default.
+   * @default 'warn'
+   */
+  readonly retryLogLevel?: 'info' | 'warn' | 'debug';
+  /**
+   * Whether to log successful completion after retries.
+   * @default false
+   */
+  readonly logSuccess?: boolean;
   /**
    * Only retry when the error matches this filter.
    * If an error does NOT match, it fails immediately without further retries.

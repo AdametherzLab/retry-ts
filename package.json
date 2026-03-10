@@ -1,6 +1,6 @@
 {
   "name": "@adametherzlab/retry-ts",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Typed retry with exponential backoff, jitter, and AbortController support",
   "type": "module",
   "main": "./dist/index.js",

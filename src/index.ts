@@ -9,7 +9,8 @@ import type {
   ErrorFilter, 
   BackoffStrategyName, 
   BackoffFunction, 
-  BackoffStrategy 
+  BackoffStrategy,
+  RetryLogger 
 } from './types.js';
 
 export type { 
@@ -23,7 +24,8 @@ export type {
   ErrorFilter, 
   BackoffStrategyName, 
   BackoffFunction, 
-  BackoffStrategy 
+  BackoffStrategy,
+  RetryLogger 
 };
 
 export { RetryError, matchesErrorFilter, computeBackoffDelay } from './types.js';

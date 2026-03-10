@@ -243,3 +243,125 @@ describe('custom jitter functions', () => {
     expect(customJitter).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('logger integration', () => {
+  it('logs retry attempts at warn level by default', async () => {
+    const logger = {
+      warn: mock(() => {}),
+      error: mock(() => {}),
+    };
+    
+    try {
+      await retry(
+        async () => { throw new Error('fail'); },
+        { maxAttempts: 3, baseDelayMs: 10, backoffStrategy: 'fixed', jitterStrategy: 'none', logger }
+      );
+    } catch (e) {
+      // expected
+    }
+    
+    expect(logger.warn).toHaveBeenCalledTimes(2); // attempts 1 and 2
+    expect(logger.warn.mock.calls[0][0]).toContain('Retry attempt 1 failed');
+    expect(logger.warn.mock.calls[0][1]).toMatchObject({ attempt: 1, delayMs: 10 });
+    expect(logger.warn.mock.calls[1][0]).toContain('Retry attempt 2 failed');
+    expect(logger.warn.mock.calls[1][1]).toMatchObject({ attempt: 2, delayMs: 10 });
+  });
+
+  it('logs final failure at error level', async () => {
+    const logger = {
+      error: mock(() => {}),
+    };
+    
+    try {
+      await retry(
+        async () => { throw new Error('final fail'); },
+        { maxAttempts: 2, baseDelayMs: 10, backoffStrategy: 'fixed', jitterStrategy: 'none', logger }
+      );
+    } catch (e) {
+      expect(e).toBeInstanceOf(RetryError);
+    }
+    
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error.mock.calls[0][0]).toContain('Failed after 2 attempts');
+    expect(logger.error.mock.calls[0][1]).toMatchObject({ attempts: 2, error: 'final fail' });
+  });
+
+  it('respects retryLogLevel configuration', async () => {
+    const logger = {
+      info: mock(() => {}),
+      warn: mock(() => {}),
+    };
+    
+    try {
+      await retry(
+        async () => { throw new Error('fail'); },
+        { maxAttempts: 2, baseDelayMs: 10, backoffStrategy: 'fixed', jitterStrategy: 'none', logger, retryLogLevel: 'info' }
+      );
+    } catch (e) {
+      // expected
+    }
+    
+    expect(logger.info).toHaveBeenCalledTimes(1);
+    expect(logger.info.mock.calls[0][0]).toContain('Retry attempt 1 failed');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('logs success when logSuccess is enabled', async () => {
+    const logger = {
+      info: mock(() => {}),
+    };
+    
+    const result = await retry(
+      async () => 'success',
+      { maxAttempts: 3, logger, logSuccess: true }
+    );
+    
+    expect(result.value).toBe('success');
+    expect(logger.info).toHaveBeenCalledTimes(1);
+    expect(logger.info.mock.calls[0][0]).toContain('succeeded');
+    expect(logger.info.mock.calls[0][1]).toMatchObject({ attempts: 1 });
+  });
+
+  it('works alongside onRetry callback', async () => {
+    const logger = { warn: mock(() => {}) };
+    const onRetry = mock(() => {});
+    
+    try {
+      await retry(
+        async () => { throw new Error('fail'); },
+        { maxAttempts: 2, baseDelayMs: 10, backoffStrategy: 'fixed', jitterStrategy: 'none', logger, onRetry }
+      );
+    } catch (e) {}
+    
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to info if specified log level is not available on logger', async () => {
+    const logger = {
+      info: mock(() => {}),
+    };
+    
+    try {
+      await retry(
+        async () => { throw new Error('fail'); },
+        { maxAttempts: 2, baseDelayMs: 10, backoffStrategy: 'fixed', jitterStrategy: 'none', logger, retryLogLevel: 'warn' }
+      );
+    } catch (e) {}
+    
+    expect(logger.info).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not log success when logSuccess is false (default)', async () => {
+    const logger = {
+      info: mock(() => {}),
+    };
+    
+    await retry(
+      async () => 'success',
+      { maxAttempts: 3, logger }
+    );
+    
+    expect(logger.info).not.toHaveBeenCalled();
+  });
+});

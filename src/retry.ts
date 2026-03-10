@@ -77,13 +77,18 @@ export function applyJitter(
  *     console.log(`Attempt ${attempt} failed, retrying in ${delayMs}ms:`, error);
  *   }
  * });
+ * @example
+ * // Use Winston logger
+ * import { createLogger } from 'winston';
+ * const logger = createLogger();
+ * const data = await retry(fetchData, { maxAttempts: 3, logger });
  */
 export async function retry<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   config?: RetryConfig
 ): Promise<RetryResult<T>> {
-  const resolvedConfig: Required<Omit<RetryConfig, 'retryOn' | 'abortOn' | 'onRetry'>> & 
-    Pick<RetryConfig, 'retryOn' | 'abortOn' | 'onRetry'> = {
+  const resolvedConfig: Required<Omit<RetryConfig, 'retryOn' | 'abortOn' | 'onRetry' | 'logger' | 'retryLogLevel' | 'logSuccess'>> & 
+    Pick<RetryConfig, 'retryOn' | 'abortOn' | 'onRetry' | 'logger' | 'retryLogLevel' | 'logSuccess'> = {
     maxAttempts: config?.maxAttempts ?? 3,
     baseDelayMs: config?.baseDelayMs ?? 1000,
     maxDelayMs: config?.maxDelayMs ?? 30000,
@@ -95,6 +100,9 @@ export async function retry<T>(
     retryOn: config?.retryOn,
     abortOn: config?.abortOn,
     onRetry: config?.onRetry,
+    logger: config?.logger,
+    retryLogLevel: config?.retryLogLevel ?? 'warn',
+    logSuccess: config?.logSuccess ?? false,
   };
 
   validateConfig(resolvedConfig);
@@ -129,6 +137,15 @@ export async function retry<T>(
 
       try {
         const value = await operation(controller.signal);
+        
+        // Log success if enabled
+        if (resolvedConfig.logger?.info && resolvedConfig.logSuccess) {
+          resolvedConfig.logger.info(`Operation succeeded after ${attempt} attempt(s)`, {
+            attempts: attempt,
+            elapsedTimeMs: Date.now() - startTime,
+          });
+        }
+        
         return { value, attempts: attempt, elapsedTimeMs: Date.now() - startTime };
       } catch (error) {
         lastError = error;
@@ -181,6 +198,20 @@ export async function retry<T>(
           });
         }
 
+        // Log retry attempt if logger is provided
+        if (resolvedConfig.logger) {
+          const level = resolvedConfig.retryLogLevel!;
+          const logFn = resolvedConfig.logger[level] ?? resolvedConfig.logger.info;
+          if (logFn) {
+            logFn(`Retry attempt ${attempt} failed, retrying in ${actualDelay}ms`, {
+              attempt,
+              error: lastError instanceof Error ? lastError.message : String(lastError),
+              delayMs: actualDelay,
+              elapsedTimeMs: Date.now() - startTime,
+            });
+          }
+        }
+
         if (actualDelay > 0) {
           await new Promise(r => setTimeout(r, actualDelay));
           previousDelayMs = actualDelay;
@@ -188,6 +219,15 @@ export async function retry<T>(
 
         attempt++;
       }
+    }
+
+    // Log final failure if logger is provided
+    if (resolvedConfig.logger?.error) {
+      resolvedConfig.logger.error(`Failed after ${attempt} attempts`, {
+        attempts: attempt,
+        error: lastError instanceof Error ? lastError.message : String(lastError),
+        elapsedTimeMs: Date.now() - startTime,
+      });
     }
 
     throw new RetryError(`Failed after ${resolvedConfig.maxAttempts} attempts`, {
