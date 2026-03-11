@@ -4,6 +4,22 @@
 
 **Type-Safe Retries with Custom Backoff Strategies, Jitter, Abort Support, and Custom Jitter Functions**
 
+## Installation
+
+bash
+bun install retry-ts
+
+
+Or with npm/yarn/pnpm:
+
+bash
+npm install retry-ts
+# or
+yarn add retry-ts
+# or
+pnpm add retry-ts
+
+
 ## Features
 
 - **Custom retry conditions**: Define precise logic for when to retry based on error type, message, or any custom criteria
@@ -13,56 +29,68 @@
 - Error filtering with `retryOn` and `abortOn`
 - Zero dependencies — pure TypeScript/ESM
 
+## Usage
+
+### Basic Retry
+
+
+import { retry } from 'retry-ts';
+
+const result = await retry(
+  async (signal) => {
+    // Your async operation here
+    return fetch('/api/data', { signal });
+  },
+  {
+    maxAttempts: 3,
+    baseDelayMs: 1000,
+  }
+);
+
+
+### Custom Backoff Strategy
+
+
+import { retry } from 'retry-ts';
+
+const result = await retry(
+  async () => fetch('/api/data'),
+  {
+    maxAttempts: 5,
+    backoffStrategy: (attempt, baseDelay) => attempt * attempt * baseDelay,
+    maxDelayMs: 10000,
+  }
+);
+
+
 ## Advanced Retry Conditions
 
 Control exactly when to retry using the `shouldRetry` predicate:
 
 
-// Retry only on specific error types/messages
-await retry(fetchData, {
-  maxAttempts: 5,
-  shouldRetry: ({ error, attempt }) => {
-    if (error instanceof RateLimitError) return true;
-    if (error instanceof NetworkError && attempt < 3) return true;
-    return false;
+const result = await retry(
+  async () => fetch('/api/data'),
+  {
+    maxAttempts: 3,
+    shouldRetry: (context) => {
+      // Retry only on network errors, not 4xx errors
+      return context.error instanceof NetworkError;
+    },
   }
-});
+);
 
-// Retry based on error message content
-await retry(apiCall, {
-  shouldRetry: ({ error }) => 
-    error instanceof Error && error.message.includes('retryable')
-});
 
-// Async condition check
-await retry(databaseQuery, {
-  shouldRetry: async ({ error }) => {
-    const isRecoverable = await checkErrorRecoverability(error);
-    return isRecoverable && attempt < 5;
+### Circuit Breaker
+
+
+import { retry, CircuitBreaker } from 'retry-ts';
+
+const breaker = new CircuitBreaker(3, 30000);
+
+const result = await retry(
+  async () => fetch('/api/data'),
+  {
+    circuitBreaker: breaker,
+    maxAttempts: 3,
   }
-});
-
-
-## Installation
-
-bash
-bun add @adametherzlab/retry-ts
-
-
-## Custom Jitter Example
-
-
-import { retry } from '@adametherzlab/retry-ts';
-
-// Custom jitter that adds ±20% variance
-const customJitter = (delay: number) => delay * (0.8 + Math.random() * 0.4);
-
-const result = await retry(unstableOperation, {
-  maxAttempts: 5,
-  baseDelayMs: 100,
-  backoffStrategy: 'exponential',
-  jitterStrategy: customJitter
-});
-
-
-// ... rest of existing README content
+);
